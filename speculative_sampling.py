@@ -11,12 +11,17 @@ def speculative_sampling(target_model, draft_model, initial_prompt_seq, max_new_
     '''
     # assert initial_prompt_seq.shape[0] == 1, 'Batch size should be 1'
 
-    n = initial_prompt_seq.shape[-1]
-    fin_prompt_seq = initial_prompt_seq.detach().clone()
+    n = initial_prompt_seq[0].shape[-1]
+    
+    # 循环赋值 
+    fin_prompt_seq = [prompt.detach().clone() for prompt in initial_prompt_seq]
+    # 在第一个batch维度 concat成一个大Tensor
+    fin_prompt_seq = torch.cat(fin_prompt_seq, dim=0) # 此时已经是张量 batch形式的
+    print(f"【INFO】concatenated_tensor.shape:{fin_prompt_seq.shape}")  # (batch_size, min_token_len(after truncation)))  (8,17)
 
     while n < max_new_tokens:
         n_orig = n
-        N = fin_prompt_seq.shape[-1]
+        N = initial_prompt_seq[0].shape[-1]
         draft_outputs, draft_logits = sample_from_draft_model(draft_model, fin_prompt_seq, new_tokens=lookahead, temperature=temperature)
         
         if debug:
@@ -30,7 +35,7 @@ def speculative_sampling(target_model, draft_model, initial_prompt_seq, max_new_
 
         accepted_flag = 1
         
-        for t in range(lookahead):  # 4
+        for t in range(lookahead):  # K 4
             numerator = target_model_distribution[:, t, draft_outputs[0, N+t]]  # p(x)
             denominator = draft_model_distribution[:, t, draft_outputs[0, N+t]] # q(x)
             ratio = (numerator / denominator)

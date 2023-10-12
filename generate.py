@@ -3,7 +3,9 @@ import time
 import random
 import argparse
 import torch
+import contexttimer
 from tqdm import tqdm
+from colorama import Fore, Style
 from transformers import AutoTokenizer, AutoModelForCausalLM
 from autoregressive_sampling import autoregressive_sampling
 from speculative_sampling import speculative_sampling
@@ -11,6 +13,9 @@ from speculative_sampling import speculative_sampling
 from typing import List, Optional, Tuple
 import random
 import json
+
+DEBUG = True
+# DEBUG = False
 
 def sample_requests(
     dataset_path: str,
@@ -25,14 +30,17 @@ def sample_requests(
     dataset = [data["conversations"][0]["value"] for data in dataset if len(data["conversations"][0]["value"])>100 and len(data["conversations"][0]["value"])<150] # 只要字符长度大于1000的prompt
     # Sample the requests.
     # return dataset[:num_requests]  #改为随机取样  
-    import random
     # 使用随机抽样获取指定数量的样本
     random_dataset = random.sample(dataset, num_requests)
     # 返回随机抽样后的数据集
+    # print(f'{random_dataset = }')
+    # random_dataset: list[num_requests]
     return random_dataset
 
-    # sampled_requests = random.sample(dataset, num_requests)
-    # return sampled_requests
+def block_print(text):
+    if DEBUG:
+        text = ' ' + text + ' '
+        print(f'{text:-^80}')
 
 parser = argparse.ArgumentParser(description='Speculative Sampling')
 parser.add_argument('--method', default="speculative", help='Sampling Method (autogressive / speculative)')
@@ -42,104 +50,80 @@ parser.add_argument('--target_model', default="facebook/opt-13b", help='Target m
 parser.add_argument('--draft_model', required=False, help='Draft model (HF Causal LM model)')
 parser.add_argument('--temperature', default=0, type=float, help='Temperature')
 args = parser.parse_args()
-
 device = "cuda" if torch.cuda.is_available() else "cpu"
 
+block_print('parameters')
+print(f'{args.batch_size = }')
+print(f'{args.target_model = }')
+if args.method == "speculative":
+    print(f'{args.draft_model = }')
+
+device_0 = 'cuda:0'
+device_1 = 'cuda:1'
+
+block_print('load model')
+target_model = AutoModelForCausalLM.from_pretrained(args.target_model).to(device_0)
 if args.method == "speculative":
     if args.draft_model is None:
         print("Draft model should be specified for Speculative Sampling")
         sys.exit(1)
+    draft_model = AutoModelForCausalLM.from_pretrained(args.draft_model).to(device_1)
 
-    print("Using target model:", args.target_model)
-    print("Using draft model:", args.draft_model)
-    
-    dataset_path = "/workspace/datasets/ShareGPT_Vicuna_unfiltered/ShareGPT_V3_unfiltered_cleaned_split.json"
-    sampled_requests = sample_requests(dataset_path,args.batch_size)
-    for request in sampled_requests:
-        print(f"【INPUT】{request}")
-    
-    print(f"【INFO】lenght sampled_requests:{len(sampled_requests)}")
-    # print(f"【INFO】sampled_requests:{len(sampled_requests[0])}")
-    # print(f"【INFO】sampled_requests:{len(sampled_requests[1])}")
-    # print(f"【INFO】sampled_requests:{len(sampled_requests[2])}")
-    # print(f"【INFO】sampled_requests:{len(sampled_requests[3])}") 
-    
-    target_model = AutoModelForCausalLM.from_pretrained(args.target_model).to(device)
-    draft_model = AutoModelForCausalLM.from_pretrained(args.draft_model).to(device)
-    tokenizer = AutoTokenizer.from_pretrained(args.target_model)
-    # sampled_requests = ["Emily found a mysterious letter on her doorstep one sunny morning.",
-    #               "Emily found a mysterious letter on her doorstep one sunny morning.",
-    #               "Emily found a mysterious letter on her doorstep one sunny morning.",
-    #               "Emily found a mysterious letter on her doorstep one sunny morning."]
-    # inputs = tokenizer(args.prompt, return_tensors="pt").to(device)
-    # inputs = tokenizer(sampled_requests, return_tensors="pt").to(device)
-    input_ids = [tokenizer(i, return_tensors="pt").input_ids.to(device) for i in sampled_requests]  # [len(sampled_requests),]  每一个维度都是一个Tensor 采样多少个请求，就是多少个Tensor
+block_print('tokenize')
+dataset_path = "/root/dataset/ShareGPT_V3_unfiltered_cleaned_split.json"
+sampled_requests = sample_requests(dataset_path,args.batch_size) # list[batch_size]
+# sampled_requests = ['Emily found a mysterious letter on her doorstep one sunny morning.']
+tokenizer = AutoTokenizer.from_pretrained(args.target_model)
+input_ids = [tokenizer(i, return_tensors="pt").input_ids.to(device_1) for i in sampled_requests]  # [len(sampled_requests),]  每一个维度都是一个Tensor 采样多少个请求，就是多少个Tensor
+# input_ids[0].shape = torch.Size([1, str_len])
+# truncation操作，padding的反义词
+# 获取所有 Tensor 第二个维度的最小值 也就是token数量的最小值
+min_dim = min(tensor.shape[1] for tensor in input_ids)
+# 截断每个 Tensor 的第二个维度 
+input_ids = [tensor[:, :min_dim] for tensor in input_ids] # [batch_size,Tensor]
+# input_ids[0].shape = torch.Size([1, min_dim])
 
-    # truncation操作，padding的反义词
-    # 获取所有 Tensor 第二个维度的最小值 也就是token数量的最小值
-    min_dim = min(tensor.shape[1] for tensor in input_ids)
-    print(f"【INFO】min_dim:{min_dim}")
-    
-    # 截断每个 Tensor 的第二个维度 
-    input_ids = [tensor[:, :min_dim] for tensor in input_ids] # [batch_size,Tensor]
+def print_text():
+    block_print('generated text')
+    for i in range (tokens.shape[0]):
+        output = [tokenizer.decode(tokens[i][j]) for j in range(tokens.shape[1])]
+        output = output[min_dim:]
+        output = ''.join(str(j) for j in output)
+        input = [tokenizer.decode(input_ids[i][0][j]) for j in range(min_dim)]
+        input = ''.join(str(j) for j in input)
+        print('【INFO】' + Fore.GREEN + f'{input}' + Style.RESET_ALL, end='')
+        print(Fore.BLUE + f'{output}' + Style.RESET_ALL)
 
-    start_time = time.time_ns()
-    tokens = speculative_sampling(target_model, draft_model, initial_prompt_seq=input_ids, max_new_tokens=args.max_new_tokens, tokenizer=tokenizer, temperature=args.temperature, debug=False)
-    end_time = time.time_ns()
-    
-    print(f"【INFO】tokens.shape:{tokens.shape}")
-
-    # new_tokens = (len(tokens[0]) - len(input_ids_list[0])) * len(sampled_requests)
+def print_time(time_cost, text = ''):
+    block_print('latency')
     new_tokens = 0
     for token in tokens:
         new_tokens += len(token) - min_dim
-    time_taken = (end_time - start_time) / 1_000_000_000
+    print(f"Latency {text}:  {new_tokens/time_cost:.2f} tok/s")
 
-    # print(tokenizer.decode(tokens))
-    for i in range (len(tokens)):
-        print(f"【OUTPUT】{tokenizer.decode(tokens[i])}")
-        
-    print()
-    print(f"Latency (Speculative Sampling): {new_tokens/time_taken:.2f} tok/s")
+block_print('speculative sampling')
+times = 1
+with contexttimer.Timer() as t:
+    for i in range(times):
+        tokens = speculative_sampling(target_model, draft_model, initial_prompt_seq=input_ids, max_new_tokens=args.max_new_tokens, 
+                                      tokenizer=tokenizer, temperature=args.temperature, debug=False)
+print_text()
+print_time(t.elapsed / times, text='speculative_sampling')
 
-elif args.method == "autoregressive":
-    print("Using target model:", args.target_model)
+# block_print('autoregressive sampling')
+# times = 1
+# with contexttimer.Timer() as t:
+#     for i in range(times):
+#         tokens = autoregressive_sampling(target_model, initial_prompt_seq=input_ids, target_len=args.max_new_tokens+len(input_ids), 
+#                                          temperature=args.temperature)
+# print_text()
+# print_time(t.elapsed / times, text='autoregressive_sampling')
 
-    target_model = AutoModelForCausalLM.from_pretrained(args.target_model).to(device)
-    tokenizer = AutoTokenizer.from_pretrained(args.target_model)
-    
-    dataset_path = "/workspace/datasets/ShareGPT_Vicuna_unfiltered/ShareGPT_V3_unfiltered_cleaned_split.json"
-    sampled_requests = sample_requests(dataset_path,args.batch_size)
-    
-    input_ids = [tokenizer(i, return_tensors="pt").input_ids.to(device) for i in sampled_requests]  # [len(sampled_requests),]  每一个维度都是一个Tensor 采样多少个请求，就是多少个Tensor
-
-    # truncation操作，padding的反义词
-    # 获取所有 Tensor 第二个维度的最小值 也就是token数量的最小值
-    min_dim = min(tensor.shape[1] for tensor in input_ids)
-    print(f"【INFO】min_dim:{min_dim}")
-    
-    # 截断每个 Tensor 的第二个维度 
-    input_ids = [tensor[:, :min_dim] for tensor in input_ids] # [batch_size,Tensor]
-    
-    # testTensor = ["Emily found a mysterious letter on her doorstep one sunny morning.",
-    #               "Emily found a mysterious letter on her doorstep one sunny morning.",
-    #               "Emily found a mysterious letter on her doorstep one sunny morning.",
-    #               "Emily found a mysterious letter on her doorstep one sunny morning."]
-
-    start_time = time.time_ns()
-    tokens = autoregressive_sampling(target_model, initial_prompt_seq=input_ids, target_len=args.max_new_tokens+len(input_ids), temperature=args.temperature)
-    end_time = time.time_ns()
-
-    new_tokens = 0
-    for token in tokens:
-        new_tokens += len(token) - min_dim
-    time_taken = (end_time - start_time) / 1_000_000_000
-
-    for i in range (len(tokens)):
-        print(f"【OUTPUT】{tokenizer.decode(tokens[i])}")
-        
-    print()
-    print(f"Latency (Naive Autoregressive Sampling): {new_tokens/time_taken:.2f} tok/s")
-
-else:
-    print("Method should be either autoregressive / speculative")
+# block_print('autoregressive sampling')
+# times = 1
+# with contexttimer.Timer() as t:
+#     for i in range(times):
+#         tokens = autoregressive_sampling(draft_model, initial_prompt_seq=input_ids, target_len=args.max_new_tokens+len(input_ids), 
+#                                          temperature=args.temperature)
+# # print_text()
+# print_time(t.elapsed / times, text='autoregressive_sampling_draft_model')

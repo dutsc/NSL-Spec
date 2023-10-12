@@ -8,8 +8,8 @@ def sample(logits, temperature):
     probs = get_distribution(logits, temperature)
     
     multinomial = torch.multinomial(probs, num_samples=1)
-    print(f"【INFO】torch.multinomial(probs, num_samples=1):{multinomial}")
-    print(f"【INFO】torch.multinomial(probs, num_samples=1) shape:{multinomial.shape}")
+    # print(f"【INFO】torch.multinomial(probs, num_samples=1):{multinomial}")
+    # print(f"【INFO】torch.multinomial(probs, num_samples=1) shape:{multinomial.shape}")
     return multinomial
 
     # return torch.multinomial(probs, num_samples=1)[0]
